@@ -1,101 +1,468 @@
-# Protheus × D4Sign — Assinatura Digital de Recibos de Férias
+# Referência Técnica — Classe `D4SignClient` e Funções da Integração
 
-Integração entre o módulo de **Recursos Humanos do TOTVS Protheus** (Gestão de Férias — rotina GP130) e a plataforma de assinatura digital **[D4Sign](https://d4sign.com.br)**.
+Documentação de referência da classe, métodos e funções da integração **Protheus × D4Sign** (assinatura digital de recibos de férias), com exemplos de uso extraídos do código real.
 
-O objetivo é automatizar o ciclo completo de geração, envio, assinatura e armazenamento dos recibos de férias dos colaboradores, eliminando a impressão e o recolhimento de assinaturas físicas.
-
-> **Versão Protheus:** 12.2410 · **Autor:** Silvano Franca — ALWA · **Última atualização:** Abril/2026
+> **Linguagem:** TLPP / AdvPL · **Versão Protheus:** 12.2310+ · **Autor:** Silvano Franca — ALWA
 
 ---
 
 ## Índice
 
-- [Visão Geral](#visão-geral)
-- [Arquitetura e Componentes](#arquitetura-e-componentes)
-- [Fluxo do Processo](#fluxo-do-processo)
-- [Componentes em Detalhe](#componentes-em-detalhe)
-  - [PE_GP030MNU — Ponto de Entrada](#pe_gp030mnu--ponto-de-entrada)
-  - [CAD4S000 — Classe D4SignClient](#cad4s000--classe-d4signclient)
-  - [CAD4S001 — Geração do Recibo em PDF](#cad4s001--geração-do-recibo-em-pdf)
-  - [CAD4S003 — Envio para Assinatura](#cad4s003--envio-para-assinatura)
-  - [CAD4S004 — Download dos Assinados](#cad4s004--download-dos-assinados)
-  - [CAD4S005 — Reenvio de Documentos com Erro](#cad4s005--reenvio-de-documentos-com-erro)
-- [Convenção de Nome dos Arquivos PDF](#convenção-de-nome-dos-arquivos-pdf)
-- [Estrutura de Diretórios](#estrutura-de-diretórios)
-- [Parâmetros do Sistema (MV_)](#parâmetros-do-sistema-mv_)
-- [Ciclo de Vida do Documento (RH_D4SIGN)](#ciclo-de-vida-do-documento-rh_d4sign)
-- [Dicionário de Dados — Campos Customizados](#dicionário-de-dados--campos-customizados)
-- [Instalação e Configuração](#instalação-e-configuração)
-- [Considerações Técnicas e Boas Práticas](#considerações-técnicas-e-boas-práticas)
-- [Referências](#referências)
+- [Classe D4SignClient (CAD4S000)](#classe-d4signclient-cad4s000)
+  - [Atributos](#atributos)
+  - [New()](#new--construtor)
+  - [Requisicao()](#requisicaocendpoint-cmetodo-aheader-cbody)
+  - [UploadDocument()](#uploaddocumentcfilepath-cnomedoc)
+  - [AddSigner()](#addsignercuuiddoc-cnome-cemail-ccpf)
+  - [SendToSign()](#sendtosigncuuiddoc)
+  - [GetStatus()](#getstatuscuuiddoc)
+  - [DownloadSigned()](#downloadsignedcuuiddoc-csavepath)
+  - [GetResult() / GetStatusCode()](#getresult--getstatuscode)
+  - [Funções estáticas internas](#funções-estáticas-internas)
+- [Funções de Usuário (User Functions)](#funções-de-usuário-user-functions)
+- [Exemplo completo — Fluxo de ponta a ponta](#exemplo-completo--fluxo-de-ponta-a-ponta)
+- [Padrão de tratamento de erro](#padrão-de-tratamento-de-erro)
+- [Observações de implementação](#observações-de-implementação)
 
 ---
 
-## Visão Geral
+## Classe `D4SignClient` (CAD4S000)
 
-O processo integrado realiza, de forma encadeada:
+**Arquivo:** `CAD4S000.tlpp`
 
-1. Geração do recibo de férias em **PDF** diretamente no Protheus (via `FWMsPrinter`).
-2. **Upload** do PDF para o cofre seguro do D4Sign.
-3. Identificação e cadastro do colaborador como **signatário** do documento.
-4. Disparo do **e-mail de assinatura** ao colaborador.
-5. **Monitoramento** do status de assinatura.
-6. **Download** do documento assinado e armazenamento no servidor.
-7. Atualização do **status** do registro no banco de dados do Protheus (tabela `SRH`).
+Encapsula toda a comunicação HTTP com a API REST do D4Sign (`FWRest`): autenticação, upload multipart, gerenciamento de signatários, consulta de status e download de documentos assinados.
 
-## Arquitetura e Componentes
+```xbase
+#Include "TOTVS.ch"
+#Include "Tlpp-core.th"
 
-| Arquivo | Componente | Descrição |
+Class D4SignClient
+
+    Data cToken     as character
+    Data cCrypt     as character
+    Data cBaseURL   as character
+    Data cCofreId   as character
+    Data cPastaID   as character
+    Data cPastDoc   as character
+    Data StatusCode as numeric
+    Data Result     as character
+
+    Public Method New()
+    Public Method Requisicao(cEndpoint, cMetodo, aHeader, cBody)
+    Public Method UploadDocument(cFilePath, cNomeDoc)   // Enviar PDF para o cofre
+    Public Method AddSigner(cUUIDDoc, cNome, cEmail)    // Registrar signatário
+    Public Method SendToSign(cUUIDDoc)                  // Disparar e-mails de assinatura
+    Public Method GetStatus(cUUIDDoc)                   // Monitorar status do documento
+    Public Method DownloadSigned(cUUIDDoc, cSavePath)   // Baixar documento assinado
+    Public Method GetResult()
+    Public Method GetStatusCode()
+
+EndClass
+```
+
+### Atributos
+
+| Atributo | Tipo | Descrição |
 |---|---|---|
-| `PE_GP030MNU.tlpp` | Ponto de entrada | Adiciona o botão **"Impressão d4Sign"** na rotina de férias (GP130). |
-| `CAD4S000.tlpp` | Classe `D4SignClient` | Camada de comunicação e autenticação com a API REST do D4Sign. |
-| `CAD4S001.PRX` | Geração do PDF | Gera o recibo de férias em PDF usando `FWMsPrinter` (substitui a impressão padrão do GP130). |
-| `CAD4S003.tlpp` | Job de envio | Upload dos PDFs pendentes, cadastro do signatário e envio para assinatura. |
-| `CAD4S004.tlpp` | Job de download | Monitoramento dos documentos enviados e download dos recibos assinados. |
-| `CAD4S005.tlpp` | Job de reenvio | Reprocessa documentos com erro na adição do signatário ou no envio para assinatura. |
-| `U_CAD4S001.ch` | Include | Definições de strings i18n (`FWI18NLang`) utilizadas pelo CAD4S001. |
-| `U_CAD4S001_pt-br.tres` | Recurso i18n | Textos em português dos recibos (aviso de férias, abono, 13º etc.). |
+| `cToken` | character | Token de autenticação da API D4Sign (`tokenAPI`). |
+| `cCrypt` | character | Chave de criptografia (`cryptKey`) complementar ao token. |
+| `cBaseURL` | character | URL base da API. Produção: `https://secure.d4sign.com.br/api/v1` · Sandbox: `https://sandbox.d4sign.com.br/api/v1`. |
+| `cCofreId` | character | UUID do cofre D4Sign onde os documentos são armazenados. |
+| `cPastaID` | character | UUID da pasta dentro do cofre *(reservado — não utilizado atualmente)*. |
+| `cPastDoc` | character | Caminho do documento *(reservado)*. |
+| `StatusCode` | numeric | Código HTTP retornado pela **última** requisição executada. |
+| `Result` | character | Corpo (JSON) da resposta da **última** requisição, ou mensagem de erro do `FWRest`. |
 
-## Fluxo do Processo
+> A classe é **stateful por requisição**: cada chamada de método sobrescreve `StatusCode` e `Result`. Sempre leia `GetStatusCode()` / `GetResult()` **imediatamente** após cada chamada, antes de executar a próxima.
 
+---
+
+### `New()` — Construtor
+
+Instancia o cliente, prepara o ambiente e carrega as credenciais.
+
+**Sintaxe**
+
+```xbase
+oD4Sign := D4SignClient():New()
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ ETAPA 1 — Geração do PDF (manual, operador de RH)               │
-│ GP130 → botão "Impressão d4Sign" (PE_GP030MNU) → u_CAD4S001     │
-│ → PDF gravado em <CS_D4SDIR>\pendente\                          │
-└──────────────────────────────┬──────────────────────────────────┘
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ ETAPA 2 — Envio para assinatura (CAD4S003, job agendado)        │
-│ Varre pendente\ → UploadDocument → consulta SRA →               │
-│ AddSigner → SendToSign → SRH.RH_D4SIGN = '2' →                  │
-│ move PDF para enviado\<empresa>\                                │
-└──────────────────────────────┬──────────────────────────────────┘
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ ETAPA 3 — Download dos assinados (CAD4S004, job agendado)       │
-│ Consulta SRH (status '1'/'2') → DownloadSigned → baixa ZIP →    │
-│ extrai em assinado\<empresa>\ → SRH.RH_D4SIGN = '4'             │
-└──────────────────────────────┬──────────────────────────────────┘
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ CONTINGÊNCIA — Reenvio de erros (CAD4S005, job agendado)        │
-│ Varre erro\addsigner\ e erro\sendsigner\ → reexecuta            │
-│ AddSigner / SendToSign → SRH.RH_D4SIGN = '2'                    │
-└─────────────────────────────────────────────────────────────────┘
+
+**Retorno:** `Self` (a própria instância).
+
+**Comportamento**
+
+1. **Preparação de ambiente para jobs:** se não houver ambiente aberto (`Select("SX2") == 0`), executa `RpcSetType(3)` e `RpcSetEnv("01","01")` — isso permite que a classe seja usada em jobs agendados sem preparação prévia.
+2. **Detecção de ambiente:** verifica o nome do servidor via `GetenvServer()`:
+   - Se contiver `CASTWFL` ou `CASTCOMP` → **produção**: carrega `CS_D4TOKEN`, `CS_D4CRYPT` e `CS_D4COFRE` via `SuperGetMV` e aponta para `secure.d4sign.com.br`;
+   - Caso contrário → **sandbox**: usa credenciais fixas no código e aponta para `sandbox.d4sign.com.br`.
+
+**Exemplo**
+
+```xbase
+Local oD4Sign as object
+
+oD4Sign := D4SignClient():New()
+
+ConOut("Ambiente: " + oD4Sign:cBaseURL)
+ConOut("Cofre:    " + oD4Sign:cCofreId)
 ```
 
 ---
 
-## Componentes em Detalhe
+### `Requisicao(cEndpoint, cMetodo, aHeader, cBody)`
 
-### PE_GP030MNU — Ponto de Entrada
+Método central de comunicação HTTP. Todos os demais métodos da classe (exceto `UploadDocument`, que monta a requisição manualmente) delegam para ele.
 
-**Arquivo:** `PE_GP030MNU.tlpp`
+**Parâmetros**
 
-Ponto de entrada padrão do Protheus executado durante a inicialização do menu da rotina **GP130** (Impressão de Recibos de Férias). Adiciona o botão **"Impressão d4Sign"** à barra de ações, vinculado à função `u_CAD4S001`.
+| Parâmetro | Tipo | Obrigatório | Descrição |
+|---|---|---|---|
+| `cEndpoint` | character | Sim | Endpoint relativo à `cBaseURL` (ex.: `/documents/{uuid}`). |
+| `cMetodo` | character | Sim | Verbo HTTP: `"POST"`, `"GET"` ou `"DELETE"`. |
+| `aHeader` | array | Não | Array de strings de headers HTTP (ex.: `{"content-type: application/json"}`). |
+| `cBody` | character | Não | Corpo da requisição (JSON) para POST; query string para GET/DELETE. |
 
-A variável pública `aRotina` contém a lista de opções do menu; o PE utiliza `AAdd` para inserir a nova entrada sem remover as demais (o código de remoção do botão padrão está comentado e pode ser ativado, se necessário).
+**Retorno:** nenhum (resultado disponível em `GetStatusCode()` / `GetResult()`).
+
+**Autenticação:** o token e a cryptKey são enviados automaticamente na **query string** de todas as chamadas:
+
+```
+{endpoint}?tokenAPI={cToken}&cryptKey={cCrypt}
+```
+
+**Exemplo — chamada genérica à API**
+
+```xbase
+Local oD4Sign := D4SignClient():New()
+Local aHeader := {}
+
+aAdd(aHeader, "accept: application/json")
+
+// Lista os cofres disponíveis na conta
+oD4Sign:Requisicao("/safes", "GET", aHeader, "")
+
+If oD4Sign:GetStatusCode() >= 200 .And. oD4Sign:GetStatusCode() < 300
+    ConOut(oD4Sign:GetResult())   // JSON com os cofres
+Else
+    ConOut("Erro HTTP " + cValToChar(oD4Sign:GetStatusCode()))
+EndIf
+```
+
+---
+
+### `UploadDocument(cFilePath, cNomeDoc)`
+
+Envia um arquivo PDF para o cofre configurado no D4Sign, via `POST /documents/{cofre}/uploadbinary` com corpo `multipart/form-data`.
+
+**Parâmetros**
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `cFilePath` | character | Caminho completo do PDF no servidor (ex.: `C:\d4sign\rh\ferias\docs\pendente\0101_000001_20260401.pdf`). |
+| `cNomeDoc` | character | Nome do documento no D4Sign. **Importante:** os 2 primeiros caracteres determinam a pasta de destino (via parâmetro `CS_D4FOLxx` — ver [`fGetFolder`](#funções-estáticas-internas)). |
+
+**Retorno:** nenhum. Em caso de sucesso, `GetResult()` retorna um JSON contendo o **`uuid`** do documento criado — guarde-o, pois ele é a chave para todas as operações seguintes.
+
+**Campos do multipart enviado**
+
+| Campo | Conteúdo |
+|---|---|
+| `base64_binary_file` | PDF convertido para Base64 (`Encode64`). |
+| `mime_type` | `application/pdf` (fixo). |
+| `name` | `cNomeDoc`. |
+| `uuid_folder` | UUID da pasta, resolvido por `fGetFolder(Left(cNomeDoc,2))`. |
+
+**Exemplo**
+
+```xbase
+Local oD4Sign  := D4SignClient():New()
+Local jRetorno := JsonObject():New()
+Local cUUIDDoc := ""
+Local cArquivo := "C:\d4sign\rh\ferias\docs\pendente\0101_000001_20260401.pdf"
+Local cNomeDoc := "0101_000001_20260401.pdf"
+
+oD4Sign:UploadDocument(cArquivo, cNomeDoc)
+
+If oD4Sign:GetStatusCode() >= 200 .And. oD4Sign:GetStatusCode() < 300
+    jRetorno:fromJson(oD4Sign:GetResult())
+    If jRetorno["uuid"] != Nil
+        cUUIDDoc := jRetorno["uuid"]
+        ConOut("Documento criado no D4Sign: " + cUUIDDoc)
+    EndIf
+Else
+    ConOut("Falha no upload: " + oD4Sign:GetResult())
+EndIf
+```
+
+---
+
+### `AddSigner(cUUIDDoc, cNome, cEmail, cCpf)`
+
+Cadastra o colaborador como signatário do documento, via `POST /documents/{uuid}/createlist`.
+
+**Parâmetros**
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `cUUIDDoc` | character | UUID do documento (retornado pelo `UploadDocument`). |
+| `cNome` | character | Nome do signatário (obtido de `SRA->RA_NOME`). |
+| `cEmail` | character | E-mail do signatário (obtido de `SRA->RA_EMAIL`) — **é a chave de identificação no D4Sign**. |
+| `cCpf` | character | CPF do signatário (obtido de `SRA->RA_CIC`). |
+
+> ⚠️ Na implementação atual, apenas o **e-mail** é efetivamente enviado no JSON de signatários; nome e CPF são recebidos mas não incluídos no corpo (ver [Observações de implementação](#observações-de-implementação)).
+
+**Configurações fixas do signatário**
+
+| Campo JSON | Valor | Significado |
+|---|---|---|
+| `act` | `"1"` | Ação: **Assinar** (a API suporta 1–13: aprovar, testemunha, fiador etc.). |
+| `foreign` | `"0"` | Possui CPF brasileiro. |
+| `certificadoicpbr` | `"0"` | Assinatura padrão D4Sign (não ICP-Brasil). |
+| `assinatura_presencial` | `"0"` | Assinatura remota. |
+
+**Corpo enviado (exemplo)**
+
+```json
+{
+  "signers": [
+    {
+      "email": "colaborador@empresa.com.br",
+      "act": "1",
+      "foreign": "0",
+      "certificadoicpbr": "0",
+      "assinatura_presencial": "0"
+    }
+  ]
+}
+```
+
+**Exemplo — consultando o colaborador na SRA**
+
+```xbase
+Local oD4Sign := D4SignClient():New()
+Local cQuery  := ""
+
+cQuery := " SELECT RA_NOME, RA_EMAIL, RA_CIC "
+cQuery += " FROM SRA010 "
+cQuery += " WHERE D_E_L_E_T_ = '' AND "
+cQuery += "       RA_FILIAL = '01' AND "
+cQuery += "       RA_MAT = '000001' "
+
+MpSysOpenQuery(cQuery, "tSRA")
+
+If tSRA->( !EOF() )
+    oD4Sign:AddSigner( cUUIDDoc            ,;
+                       AllTrim(tSRA->RA_NOME) ,;
+                       AllTrim(tSRA->RA_EMAIL),;
+                       AllTrim(tSRA->RA_CIC)  )
+
+    If oD4Sign:GetStatusCode() >= 200 .And. oD4Sign:GetStatusCode() < 300
+        ConOut("Signatário cadastrado com sucesso")
+    EndIf
+EndIf
+tSRA->( DbCloseArea() )
+```
+
+---
+
+### `SendToSign(cUUIDDoc)`
+
+Dispara os e-mails de solicitação de assinatura para os signatários já cadastrados no documento, via `POST /documents/{uuid}/sendtosigner`.
+
+**Parâmetros**
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `cUUIDDoc` | character | UUID do documento no D4Sign. |
+
+**Retorno:** nenhum (verificar `GetStatusCode()`).
+
+**Exemplo**
+
+```xbase
+oD4Sign:SendToSign(cUUIDDoc)
+
+If oD4Sign:GetStatusCode() >= 200 .And. oD4Sign:GetStatusCode() < 300
+    // Atualiza status no Protheus: 2 = Aguardando Assinatura
+    TcSqlExec("UPDATE SRH010 SET RH_D4SIGN = '2' WHERE ... ")
+EndIf
+```
+
+---
+
+### `GetStatus(cUUIDDoc)`
+
+Consulta o status atual do documento, via `GET /documents/{uuid}`.
+
+**Parâmetros**
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `cUUIDDoc` | character | UUID do documento no D4Sign. |
+
+**Retorno:** nenhum. `GetResult()` traz um **array JSON** — como a consulta é feita por um único UUID, o documento está sempre na **posição 1**.
+
+**Principais status do D4Sign (`statusId`)**
+
+| statusId | Significado |
+|---|---|
+| `"1"` | Em processamento |
+| `"2"` | Aguardando signatários |
+| `"3"` | Aguardando assinaturas |
+| `"4"` | **Finalizado (assinado)** — pronto para download |
+| `"5"` | Arquivado |
+| `"6"` | Cancelado |
+
+**Exemplo — verificando se o documento foi assinado**
+
+```xbase
+Local jRetorno := JsonObject():New()
+Local cStatus  := ""
+
+oD4Sign:GetStatus(cUUIDDoc)
+
+If oD4Sign:GetStatusCode() >= 200 .And. oD4Sign:GetStatusCode() < 300
+    jRetorno:fromJson(oD4Sign:GetResult())
+    cStatus := jRetorno[1]["statusId"]   // retorno é array: posição 1
+
+    If cStatus == "4"
+        ConOut("Documento assinado! Pronto para download.")
+    EndIf
+EndIf
+```
+
+---
+
+### `DownloadSigned(cUUIDDoc, cSavePath)`
+
+Solicita o link de download do documento assinado, via `POST /documents/{uuid}/download`.
+
+**Parâmetros**
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `cUUIDDoc` | character | UUID do documento no D4Sign. |
+| `cSavePath` | character | Diretório de destino no servidor *(informativo — o download em si é feito pelo chamador; ver exemplo)*. |
+
+**Corpo enviado (fixo)**
+
+```json
+{
+  "type": "pdf",
+  "language": "pt",
+  "encoding": false,
+  "document": false,
+  "videoselfie_frame": false
+}
+```
+
+**Retorno:** nenhum. `GetResult()` traz um JSON com:
+
+| Campo | Descrição |
+|---|---|
+| `name` | Nome do arquivo. |
+| `url` | **URL temporária** de um ZIP contendo o PDF assinado. |
+
+> A URL é temporária — o download (`HttpGet`) deve ser feito imediatamente após a chamada.
+
+**Exemplo — download, extração e limpeza (padrão do CAD4S004)**
+
+```xbase
+Local jRetorno := JsonObject():New()
+Local cDirDow  := "C:\d4sign\rh\ferias\docs\assinado\01\"
+Local cArquivo := ""
+Local cUrl     := ""
+Local cArqZip  := ""
+Local nRetorno := 0
+
+oD4Sign:DownloadSigned(cUUIDDoc, cDirDow)
+
+If oD4Sign:GetStatusCode() >= 200 .And. oD4Sign:GetStatusCode() < 300
+    jRetorno:fromJson(oD4Sign:GetResult())
+    cArquivo := jRetorno["name"]
+    cUrl     := jRetorno["url"]
+    cArqZip  := cDirDow + cArquivo + ".zip"
+
+    // Baixa o ZIP pela URL temporária e grava em disco
+    If MemoWrite(cArqZip, HttpGet(cUrl))
+        nRetorno := fUnzip(cArqZip, cDirDow)
+        If nRetorno == 0
+            fErase(cArqZip)   // remove o ZIP após extração
+            // ... remover pasta "originais\" com os PDFs não assinados do pacote
+        EndIf
+    EndIf
+EndIf
+```
+
+---
+
+### `GetResult()` / `GetStatusCode()`
+
+Acessores do resultado da última requisição.
+
+| Método | Retorno | Descrição |
+|---|---|---|
+| `GetResult()` | character | Corpo (JSON) da última resposta da API, ou mensagem de erro do `FWRest`. |
+| `GetStatusCode()` | numeric | Código HTTP da última requisição (ex.: `200`, `401`, `500`). |
+
+**Exemplo — padrão de verificação**
+
+```xbase
+nStatus := oD4Sign:GetStatusCode()
+
+If nStatus >= 200 .And. nStatus < 300
+    // Sucesso — processar oD4Sign:GetResult()
+Else
+    // Falha — logar/gravar oD4Sign:GetResult() para diagnóstico
+EndIf
+```
+
+---
+
+### Funções estáticas internas
+
+Funções auxiliares privadas do `CAD4S000.tlpp` (não acessíveis fora do fonte):
+
+#### `D4S_BuildMultipart(cBoundary, aParts)`
+
+Monta o corpo `multipart/form-data` da requisição de upload.
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `cBoundary` | character | Delimitador do multipart (gerado dinamicamente: `----ProtheusBoundary` + hora). |
+| `aParts` | array | Array de pares `{nome_do_campo, valor}`. |
+
+**Retorno:** `character` — corpo multipart completo.
+
+```xbase
+// Uso interno no UploadDocument:
+aAdd(aParts, {"base64_binary_file", cBase64})
+aAdd(aParts, {"mime_type", "application/pdf"})
+aAdd(aParts, {"name", cNomeDoc})
+aAdd(aParts, {"uuid_folder", cFolder})
+
+cBody := D4S_BuildMultipart(cBoundary, aParts)
+```
+
+#### `fGetFolder(xEmpresa)`
+
+Resolve o UUID da pasta D4Sign a partir do código da empresa.
+
+| Parâmetro | Tipo | Descrição |
+|---|---|---|
+| `xEmpresa` | character | Código da empresa (2 caracteres — extraído do início do nome do documento). |
+
+**Retorno:** `character` — UUID da pasta, lido do parâmetro `CS_D4FOL{xEmpresa}` (ex.: empresa `01` → parâmetro `CS_D4FOL01`).
+
+---
+
+## Funções de Usuário (User Functions)
+
+### `U_GP030MNU()` — Ponto de entrada
+
+**Arquivo:** `PE_GP030MNU.tlpp` · **Contexto:** executado automaticamente pelo Protheus ao abrir o menu da rotina GP130.
+
+Adiciona o botão **"Impressão d4Sign"** à barra de ações, vinculado a `u_CAD4S001`.
 
 ```xbase
 User Function GP030MNU()
@@ -108,271 +475,178 @@ User Function GP030MNU()
 Return
 ```
 
-| Posição do array | Valor | Significado |
-|---|---|---|
-| 1 | `"Impressão d4Sign"` | Título do botão |
-| 2 | `"u_CAD4S001"` | Função chamada |
-| 3 | `0` | Nível de acesso |
-| 4 | `2` | Tipo de operação (Impressão) |
-| 6 | `.F.` | Botão visível (não oculto) |
+### `U_CAD4S001()` — Geração do recibo em PDF
 
-### CAD4S000 — Classe D4SignClient
+**Arquivo:** `CAD4S001.PRX` · **Contexto:** interativo (chamado pelo botão na GP130).
 
-**Arquivo:** `CAD4S000.tlpp`
+Exibe o diálogo de parâmetros (pergunte `GPEM030`), processa os funcionários da `SRA` com férias vigentes e gera os PDFs via `FWMsPrinter` em `<CS_D4SDIR>\pendente\`. Não recebe parâmetros — toda a parametrização vem do pergunte.
 
-Implementa a classe `D4SignClient`, responsável por toda a comunicação HTTP com a API REST do D4Sign: autenticação, requisições multipart, upload de documentos, gerenciamento de signatários e download dos arquivos assinados.
+### `U_CAD4S003()` — Job de envio para assinatura
 
-#### Atributos
+**Arquivo:** `CAD4S003.tlpp` · **Contexto:** job agendado (Schedule).
 
-| Atributo | Descrição |
-|---|---|
-| `cToken` | Token de autenticação da API D4Sign (live ou sandbox). |
-| `cCrypt` | Chave de criptografia (cryptKey) complementar ao token. |
-| `cBaseURL` | URL base da API (`https://secure.d4sign.com.br/api/v1` em produção). |
-| `cCofreId` | UUID do cofre onde os documentos são armazenados. |
-| `cPastaID` | UUID da pasta dentro do cofre (reservado). |
-| `cPastDoc` | Caminho do documento (reservado). |
-| `StatusCode` | Código HTTP da última requisição. |
-| `Result` | Corpo da resposta da última requisição. |
+Para cada PDF em `pendente\`: faz upload, cadastra o signatário, dispara a assinatura, atualiza a `SRH` e move o arquivo. Não recebe parâmetros.
 
-#### Métodos públicos
+```xbase
+// Agendamento via Schedule ou execução manual:
+U_CAD4S003()
+```
 
-| Método | Parâmetros | Descrição |
-|---|---|---|
-| `New()` | — | Construtor. Detecta o ambiente (produção/sandbox) e carrega tokens/URLs via `SuperGetMV`. |
-| `Requisicao()` | `cEndpoint, cMetodo, aHeader, cBody` | Método central de comunicação. Executa GET, POST ou DELETE via `FWRest`. |
-| `UploadDocument()` | `cFilePath, cNomeDoc` | Envia um PDF ao cofre D4Sign via `multipart/form-data` com Base64. |
-| `AddSigner()` | `cUUIDDoc, cNome, cEmail, cCpf` | Cadastra o colaborador como signatário do documento. |
-| `SendToSign()` | `cUUIDDoc` | Dispara os e-mails de solicitação de assinatura. |
-| `GetStatus()` | `cUUIDDoc` | Consulta o status atual do documento (`GET /documents/{uuid}`). |
-| `DownloadSigned()` | `cUUIDDoc, cSavePath` | Solicita o link de download do documento assinado. |
-| `GetResult()` | — | Retorna o corpo da última resposta da API. |
-| `GetStatusCode()` | — | Retorna o código HTTP da última requisição. |
+### `U_CAD4S004()` — Job de monitoramento e download
 
-#### Detecção de ambiente
+**Arquivo:** `CAD4S004.tlpp` · **Contexto:** job agendado (Schedule).
 
-O método `New()` detecta o ambiente pelo nome do servidor (`GetenvServer`). Se o nome contiver a string `CAST`, utiliza os parâmetros de produção (`MV_`); caso contrário, usa o ambiente **sandbox** com valores fixos no código.
+Consulta a `SRH` de todas as empresas (`RH_D4SIGN IN ('1','2','5')`), verifica o status de cada documento via `GetStatus()` e, quando `statusId == "4"` (assinado), baixa e extrai o PDF em `assinado\<empresa>\`, atualizando `RH_D4SIGN = '4'`.
 
-#### Upload multipart
+```xbase
+U_CAD4S004()
+```
 
-O `UploadDocument` converte o PDF para Base64 (`Encode64`) e monta o corpo `multipart/form-data` com os campos:
+### `U_CAD4S005()` — Job de reenvio de erros
 
-- `base64_binary_file` — conteúdo do PDF em Base64
-- `mime_type` — fixo `application/pdf`
-- `name` — nome do arquivo (usado também para determinar a pasta via `fGetFolder`)
-- `uuid_folder` — UUID da pasta D4Sign, obtido via parâmetro `CS_D4FOLxx`
+**Arquivo:** `CAD4S005.tlpp` · **Contexto:** job agendado (Schedule).
 
-#### Configuração fixa do signatário (AddSigner)
+Reprocessa documentos com falha (`RH_D4SIGN = '5'`):
 
-| Campo | Valor | Significado |
-|---|---|---|
-| `act` | `'1'` | Ação: Assinar |
-| `foreign` | `'0'` | Possui CPF brasileiro |
-| `certificadoicpbr` | `'0'` | Assinatura padrão D4Sign (não ICP-Brasil) |
-| `assinatura_presencial` | `'0'` | Assinatura remota |
+- `ReenviaSignatario()` — varre `erro\addsigner\`, reexecuta `AddSigner` + `SendToSign`;
+- `ReenviaAssinatura()` — varre `erro\sendsigner\`, reexecuta apenas `SendToSign`.
 
-### CAD4S001 — Geração do Recibo em PDF
-
-**Arquivo:** `CAD4S001.PRX` · **Includes:** `U_CAD4S001.ch` / `U_CAD4S001_pt-br.tres`
-
-Reescrita da rotina padrão de impressão de férias do Protheus (GP130), adaptada para o componente **`FWMsPrinter`**, que gera PDFs diretamente no servidor, sem impressora física.
-
-A função `u_CAD4S001` (chamada pelo botão do PE):
-
-1. Verifica restrições de acesso a dados sensíveis (`ChkOfusca` / `FwProtectedDataUtil`);
-2. Exibe o diálogo de parâmetros de impressão (pergunte **GPEM030**);
-3. Chama a função estática `GP130Imp` para processar os registros e gerar os PDFs em `<CS_D4SDIR>\pendente\`.
-
-#### Parâmetros de impressão (GPEM030)
-
-| Parâmetro | Descrição |
-|---|---|
-| `mv_par01` | Solicitar 1ª parcela do 13º salário |
-| `mv_par02` | Solicitar Abono Pecuniário |
-| `mv_par03` | Imprimir Aviso de Férias |
-| `mv_par04` | Imprimir Recibo de Férias |
-| `mv_par05` | Imprimir Recibo de Abono |
-| `mv_par06` | Imprimir Recibo da 1ª parcela do 13º |
-| `mv_par07` | Imprimir período de férias |
-| `mv_par08/09` | Período de férias (De / Até) |
-| `mv_par10–17` | Filtros: Filial, Matrícula, Centro de Custo, Nome (De / Até) |
-| `mv_par18` | Data de solicitação do 13º |
-| `mv_par19` | Número de vias a imprimir |
-| `mv_par20/21` | Data de pagamento (De / Até) |
-
-#### Processamento (GP130Imp)
-
-Percorre a tabela `SRA` (Funcionários) respeitando os filtros e, para cada funcionário com período de férias vigente:
-
-- Carrega o período de cálculo de férias (`fGetLastPer`, `fCarPeriodo`);
-- Carrega as tabelas de apuração de dias de férias, considerando regime parcial (Art. 130-A da CLT);
-- Consulta o arquivo `SRF` para localizar o período de férias programado;
-- Calcula dias de férias, abono pecuniário, deduções por faltas e demais fatores;
-- Chama `ImpFerpdf()` (impressão via `FWMsPrinter`) para cada via solicitada.
-
-A função auxiliar `fLogoEmp()` localiza e copia o logotipo da empresa para uma pasta temporária do servidor, buscando o arquivo na ordem: **Grupo+Empresa+Unidade+Filial → Empresa+Filial → `LGRL01.BMP` (padrão)**.
-
-#### Internacionalização (i18n)
-
-Os textos dos recibos (aviso de férias, solicitação de abono, 1ª parcela do 13º etc.) são definidos via `FWI18NLang` no include `U_CAD4S001.ch` e no arquivo de recurso `U_CAD4S001_pt-br.tres`, permitindo tradução sem alteração do fonte.
-
-### CAD4S003 — Envio para Assinatura
-
-**Arquivo:** `CAD4S003.tlpp` · **Execução:** Job agendado (Schedule)
-
-Varre a pasta de PDFs pendentes, faz o upload de cada documento, cadastra o colaborador como signatário e dispara a assinatura.
-
-| # | Etapa | Detalhe |
-|---|---|---|
-| 1 | Varredura | Lista todos os `.pdf` em `<CS_D4SDIR>\pendente\`. |
-| 2 | Extração do nome | Interpreta o nome do arquivo (empresa, filial, matrícula, data — ver [convenção](#convenção-de-nome-dos-arquivos-pdf)). |
-| 3 | Upload | `oD4Sign:UploadDocument()` → obtém o UUID do documento no D4Sign. |
-| 4 | Consulta SRA | Busca `RA_NOME`, `RA_EMAIL`, `RA_XEMAIL2`, `RA_CIC` usando empresa/filial/matrícula. |
-| 5 | AddSigner | Cadastra o colaborador como signatário (e-mail principal `RA_EMAIL`). |
-| 6 | SendToSign | Dispara o e-mail de assinatura. |
-| 7 | Atualiza SRH | `UPDATE SRH`: grava `RH_IDD4SIG` (UUID) e `RH_D4SIGN = '2'`. |
-| 8 | Move arquivo | Copia o PDF de `pendente\` para `enviado\<empresa>\` e apaga o original. |
-| 9 | Erro | Falha em etapa HTTP → `RH_D4SIGN = '5'` e retorno da API gravado em `RH_IDD4SIG`. |
-
-### CAD4S004 — Download dos Assinados
-
-**Arquivo:** `CAD4S004.tlpp` · **Execução:** Job agendado (Schedule)
-
-Monitora os documentos enviados e baixa os já assinados pelo colaborador.
-
-| # | Etapa | Detalhe |
-|---|---|---|
-| 1 | Consulta SRH | Query `UNION` para todas as empresas (via `U_GetEmpRA`), buscando `RH_D4SIGN IN ('1','2')`. |
-| 2 | DownloadSigned | `oD4Sign:DownloadSigned()` com o UUID de `RH_IDD4SIG` → API retorna JSON com `name` e `url` (link temporário do ZIP). |
-| 3 | Download do ZIP | `HttpGet(cUrl)` e gravação em disco via `MemoWrite`. |
-| 4 | Extração | Descompacta o ZIP em `<CS_D4SDIR>\assinado\<empresa>\` usando `fUnzip`. |
-| 5 | Limpeza | Remove o ZIP, a pasta `originais` e conteúdos não assinados do pacote D4Sign. |
-| 6 | Atualiza SRH | `RH_D4SIGN = '4'` (Baixado / Concluído). |
-| 7 | Erro | HTTP fora de 200–299 → `RH_D4SIGN = '5'` e registro do retorno da API. |
-
-### CAD4S005 — Reenvio de Documentos com Erro
-
-**Arquivo:** `CAD4S005.tlpp` · **Execução:** Job agendado (Schedule)
-
-Job de contingência que reprocessa documentos que falharam na etapa de cadastro de signatário ou de envio para assinatura (`RH_D4SIGN = '5'`). Composto por duas rotinas:
-
-**`ReenviaSignatario()`**
-- Varre `<CS_D4SDIR>\erro\addsigner\` em busca de PDFs;
-- Extrai empresa/filial/matrícula/data do nome do arquivo;
-- Consulta `SRA` × `SRH` (JOIN por filial, matrícula e `RH_DTRECIB`) filtrando `RH_D4SIGN = '5'`;
-- Reexecuta `AddSigner` e, em caso de sucesso, `SendToSign`;
-- Sucesso completo → `RH_D4SIGN = '2'` e move o PDF para `enviado\<empresa>\`;
-- Falha no `SendToSign` → move o PDF para `erro\sendsigner\` (reprocessado pela rotina seguinte).
-
-**`ReenviaAssinatura()`**
-- Varre `<CS_D4SDIR>\erro\sendsigner\`;
-- Mesma lógica de consulta, reexecutando apenas o `SendToSign` (o signatário já foi cadastrado);
-- Sucesso → `RH_D4SIGN = '2'` e move o PDF para `enviado\<empresa>\`.
+```xbase
+U_CAD4S005()
+```
 
 ---
 
-## Convenção de Nome dos Arquivos PDF
+## Exemplo completo — Fluxo de ponta a ponta
 
-O nome do arquivo gerado pelo CAD4S001 segue estrutura **posicional** — o CAD4S003 e o CAD4S005 extraem os dados diretamente da posição dos caracteres:
+Exemplo consolidado do ciclo upload → signatário → assinatura → monitoramento → download, seguindo o padrão real dos jobs CAD4S003/CAD4S004:
 
+```xbase
+#Include "totvs.ch"
+#Include "Tlpp-core.th"
+
+User Function ExemploD4S()
+
+    Local oD4Sign  := D4SignClient():New()
+    Local jRetorno := JsonObject():New()
+    Local cArquivo := "C:\d4sign\rh\ferias\docs\pendente\0101_000001_20260401.pdf"
+    Local cNomeDoc := "0101_000001_20260401.pdf"
+    Local cUUIDDoc := ""
+    Local nStatus  := 0
+    Local cStatus  := ""
+
+    // ------------------------------------------------------------------
+    // 1) UPLOAD do PDF para o cofre
+    // ------------------------------------------------------------------
+    oD4Sign:UploadDocument(cArquivo, cNomeDoc)
+    nStatus := oD4Sign:GetStatusCode()
+
+    If !(nStatus >= 200 .And. nStatus < 300)
+        ConOut("[D4Sign] Erro no upload: " + oD4Sign:GetResult())
+        Return
+    EndIf
+
+    jRetorno:fromJson(oD4Sign:GetResult())
+    cUUIDDoc := jRetorno["uuid"]
+
+    // ------------------------------------------------------------------
+    // 2) ADDSIGNER — cadastra o colaborador como signatário
+    // ------------------------------------------------------------------
+    oD4Sign:AddSigner(cUUIDDoc, "JOSE DA SILVA", "jose.silva@empresa.com.br", "12345678900")
+    nStatus := oD4Sign:GetStatusCode()
+
+    If !(nStatus >= 200 .And. nStatus < 300)
+        ConOut("[D4Sign] Erro ao cadastrar signatário: " + oD4Sign:GetResult())
+        Return
+    EndIf
+
+    // ------------------------------------------------------------------
+    // 3) SENDTOSIGN — dispara o e-mail de assinatura
+    // ------------------------------------------------------------------
+    oD4Sign:SendToSign(cUUIDDoc)
+    nStatus := oD4Sign:GetStatusCode()
+
+    If !(nStatus >= 200 .And. nStatus < 300)
+        ConOut("[D4Sign] Erro ao enviar para assinatura: " + oD4Sign:GetResult())
+        Return
+    EndIf
+
+    ConOut("[D4Sign] Documento " + cUUIDDoc + " aguardando assinatura")
+    // Neste ponto, gravar RH_IDD4SIG = cUUIDDoc e RH_D4SIGN = '2' na SRH
+
+    // ------------------------------------------------------------------
+    // 4) GETSTATUS — monitoramento (normalmente em job separado)
+    // ------------------------------------------------------------------
+    oD4Sign:GetStatus(cUUIDDoc)
+    nStatus := oD4Sign:GetStatusCode()
+
+    If nStatus >= 200 .And. nStatus < 300
+        jRetorno:fromJson(oD4Sign:GetResult())
+        cStatus := jRetorno[1]["statusId"]   // resposta é um array
+
+        // ----------------------------------------------------------
+        // 5) DOWNLOADSIGNED — se assinado, baixa e extrai
+        // ----------------------------------------------------------
+        If cStatus == "4"
+            Local cDirDow := "C:\d4sign\rh\ferias\docs\assinado\01\"
+            Local cUrl, cArqZip
+
+            oD4Sign:DownloadSigned(cUUIDDoc, cDirDow)
+            nStatus := oD4Sign:GetStatusCode()
+
+            If nStatus >= 200 .And. nStatus < 300
+                jRetorno:fromJson(oD4Sign:GetResult())
+                cArqZip := cDirDow + jRetorno["name"] + ".zip"
+                cUrl    := jRetorno["url"]
+
+                If MemoWrite(cArqZip, HttpGet(cUrl))
+                    If fUnzip(cArqZip, cDirDow) == 0
+                        fErase(cArqZip)
+                        ConOut("[D4Sign] PDF assinado salvo em " + cDirDow)
+                        // Gravar RH_D4SIGN = '4' na SRH
+                    EndIf
+                EndIf
+            EndIf
+        EndIf
+    EndIf
+
+Return
 ```
-EEFF_MMMMMM_AAAAMMDD.pdf
+
+---
+
+## Padrão de tratamento de erro
+
+Todos os consumidores da classe seguem o mesmo padrão:
+
+```xbase
+oD4Sign:<Metodo>(...)
+nStatus := oD4Sign:GetStatusCode()
+
+If nStatus >= 200 .And. nStatus < 300
+    // Sucesso → processar GetResult(), atualizar SRH, mover arquivo
+Else
+    // Falha → RH_D4SIGN = '5', gravar GetResult() em RH_IDD4SIG,
+    //         mover o PDF para erro\addsigner\ ou erro\sendsigner\
+    //         (o job CAD4S005 reprocessa esses diretórios)
+EndIf
 ```
 
-| Posição | Conteúdo |
-|---|---|
-| 1–2 | Empresa (`EE`) |
-| 3–4 | Filial (`FF`) |
-| 5 | `_` |
-| 6–11 | Matrícula (`MMMMMM`) |
-| 12 | `_` |
-| 13–20 | Data do recibo (`AAAAMMDD`) |
-
-**Exemplo:** `0101_000001_20260401.pdf` → Empresa 01, Filial 01, Matrícula 000001, recibo de 01/04/2026.
-
-> ⚠️ Qualquer alteração no padrão de nomenclatura exige ajuste correspondente nas funções `SubStr` do CAD4S003 e do CAD4S005.
-
-## Estrutura de Diretórios
-
-Diretório raiz definido pelo parâmetro `CS_D4SDIR`:
-
-```
-<CS_D4SDIR>\
-├── pendente\              → PDFs gerados pelo CAD4S001, aguardando envio
-├── enviado\<empresa>\     → PDFs após upload bem-sucedido
-├── assinado\<empresa>\    → PDFs assinados baixados pelo CAD4S004
-└── erro\
-    ├── addsigner\         → falha no cadastro do signatário (reprocessa CAD4S005)
-    └── sendsigner\        → falha no envio para assinatura (reprocessa CAD4S005)
-```
-
-## Parâmetros do Sistema (MV_)
-
-| Parâmetro | Descrição |
-|---|---|
-| `CS_D4TOKEN` | Token de autenticação da API D4Sign (`live_...`). |
-| `CS_D4CRYPT` | Chave de criptografia (cryptKey) da API. |
-| `CS_D4COFRE` | UUID do cofre principal no D4Sign. |
-| `CS_D4FOLxx` | UUID da pasta D4Sign por empresa — o sufixo `xx` corresponde aos 2 primeiros caracteres do nome do documento (ex.: `CS_D4FOL01` para a empresa `01`). |
-| `CS_D4SDIR` | Diretório raiz dos PDFs de férias (padrão: `C:\d4sign\rh\ferias\docs\`). |
-
-> 🔒 Os valores dos tokens **não** devem ser versionados neste repositório. Cadastre-os apenas no configurador (SX6) do ambiente.
-
-## Ciclo de Vida do Documento (RH_D4SIGN)
-
-O campo `RH_D4SIGN` na tabela `SRH` controla o ciclo de vida do documento na integração:
-
-| Código | Status | Descrição |
+| Etapa que falhou | Destino do PDF | Reprocessado por |
 |---|---|---|
-| `'1'` | Enviado | Documento enviado ao D4Sign, aguardando confirmação. |
-| `'2'` | Aguardando Assinatura | Signatário cadastrado e e-mail disparado. |
-| `'3'` | Assinado | Documento assinado (verificação via `GetStatus`). |
-| `'4'` | Baixado / Concluído | Download do assinado realizado. Processo encerrado. |
-| `'5'` | Erro na Integração | Falha em alguma etapa. Detalhes em `RH_IDD4SIG`. |
+| `AddSigner` | `erro\addsigner\` | `CAD4S005 → ReenviaSignatario()` |
+| `SendToSign` | `erro\sendsigner\` | `CAD4S005 → ReenviaAssinatura()` |
 
-## Dicionário de Dados — Campos Customizados
+---
 
-A tabela `SRH` (Férias) deve conter os campos:
+## Observações de implementação
 
-| Campo | Tipo | Descrição |
-|---|---|---|
-| `RH_IDD4SIG` | Caractere | UUID do documento no D4Sign ou mensagem de erro da API (quando status `'5'`). |
-| `RH_D4SIGN` | Caractere (1) | Status da integração (`'1'` a `'5'`). |
+Pontos identificados na análise do código, úteis para manutenção e evolução:
 
-## Instalação e Configuração
-
-1. **Compilar os fontes** no repositório do ambiente: `CAD4S000.tlpp`, `CAD4S001.PRX` (+ `U_CAD4S001.ch` e `U_CAD4S001_pt-br.tres`), `CAD4S003.tlpp`, `CAD4S004.tlpp`, `CAD4S005.tlpp` e `PE_GP030MNU.tlpp`.
-2. **Criar os campos customizados** `RH_IDD4SIG` e `RH_D4SIGN` na tabela `SRH` (SX3).
-3. **Cadastrar os parâmetros** `CS_D4TOKEN`, `CS_D4CRYPT`, `CS_D4COFRE`, `CS_D4FOLxx` e `CS_D4SDIR` no configurador (SX6).
-4. **Criar a estrutura de diretórios** no servidor conforme [Estrutura de Diretórios](#estrutura-de-diretórios).
-5. **Agendar os jobs** no Schedule Manager do Protheus:
-   - `U_CAD4S003` — recomendado a cada **15–30 minutos**;
-   - `U_CAD4S004` — recomendado a cada **1 hora** (ou conforme SLA de assinatura do RH);
-   - `U_CAD4S005` — conforme necessidade de reprocessamento de erros.
-6. Validar o botão **"Impressão d4Sign"** na rotina GP130 (módulo SIGAGPE).
-
-## Considerações Técnicas e Boas Práticas
-
-**Segurança de credenciais**
-- Tokens (`CS_D4TOKEN`, `CS_D4CRYPT`) devem ficar exclusivamente em parâmetros de sistema — nunca em código-fonte de produção nem no repositório.
-- O ambiente sandbox possui credenciais fixas no código: remover ou proteger antes de qualquer deploy em produção.
-- Avaliar criptografia adicional dos parâmetros sensíveis via `FWProtectedData`.
-
-**Tratamento de erros**
-- Registros com `RH_D4SIGN = '5'` devem ser monitorados; o campo `RH_IDD4SIG` contém o erro retornado pela API para diagnóstico.
-- O CAD4S005 automatiza o reprocessamento dos erros de `AddSigner` e `SendToSign`.
-- Recomenda-se implementar alertas automáticos (e-mail/notificação) para documentos com status de erro.
-
-**Cadastro de colaboradores**
-- O e-mail do signatário é o campo `RA_EMAIL` da tabela `SRA`; o campo `RA_XEMAIL2` também é recuperado (disponível para cenários com múltiplos e-mails).
-- Garantir que os e-mails estejam cadastrados e válidos antes de executar o CAD4S003.
-
-## Referências
-
-| Recurso | Detalhe |
-|---|---|
-| D4Sign API v1 (produção) | `https://secure.d4sign.com.br/api/v1` |
-| D4Sign API v1 (sandbox) | `https://sandbox.d4sign.com.br/api/v1` |
-| Rotina Protheus | GP130 — Impressão de Recibos de Férias (SIGAGPE) |
-| Tabelas envolvidas | `SRA` (Funcionários), `SRH` (Férias), `SRF` (Programação de Férias) |
-| Autor | Silvano Franca — ALWA |
+1. **`AddSigner` — nome e CPF não enviados:** a assinatura do método recebe `cNome` e `cCpf`, mas o JSON enviado ao D4Sign contém apenas o `email` e os campos fixos. Se for necessário validação por CPF ou exibição do nome no fluxo de assinatura, incluir os campos correspondentes no corpo da requisição.
+2. **`DownloadSigned` — parâmetro `cSavePath` não utilizado:** o método apenas solicita a URL de download; a gravação em disco é responsabilidade do chamador (`MemoWrite` + `HttpGet`). O parâmetro está reservado para uma futura internalização do download.
+3. **Divergência declaração × implementação:** a declaração da classe lista `AddSigner(cUUIDDoc, cNome, cEmail)`, mas a implementação aceita o 4º parâmetro `cCpf`. Recomenda-se alinhar a declaração.
+4. **Autenticação por query string:** `tokenAPI` e `cryptKey` trafegam na URL. Garantir que logs de proxy/servidor não persistam URLs completas, pois expõem as credenciais.
+5. **Credenciais sandbox fixas no código:** o construtor possui tokens hardcoded para o ambiente sandbox. **Não versionar valores reais** — substituir por parâmetros ou variáveis de ambiente antes de publicar o fonte em repositório.
+6. **Detecção de ambiente por nome do servidor:** a escolha produção/sandbox depende do nome do servidor conter `CASTWFL`/`CASTCOMP`. Ao subir novos servidores de produção, atenção à convenção de nomes (ou migrar para um parâmetro `MV_` de ambiente).
+7. **Instância stateful:** `StatusCode` e `Result` refletem apenas a última requisição — em loops, capture os valores antes da próxima chamada.
