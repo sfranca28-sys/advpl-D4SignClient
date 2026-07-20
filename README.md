@@ -534,6 +534,9 @@ User Function ExemploD4S()
     Local cUUIDDoc := ""
     Local nStatus  := 0
     Local cStatus  := ""
+    Local cDirDow := "C:\d4sign\rh\ferias\docs\assinado\01\"
+    Local cUrl    := ""
+    Local cArqZip := ""
 
     // ------------------------------------------------------------------
     // 1) UPLOAD do PDF para o cofre
@@ -588,8 +591,6 @@ User Function ExemploD4S()
         // 5) DOWNLOADSIGNED — se assinado, baixa e extrai
         // ----------------------------------------------------------
         If cStatus == "4"
-            Local cDirDow := "C:\d4sign\rh\ferias\docs\assinado\01\"
-            Local cUrl, cArqZip
 
             oD4Sign:DownloadSigned(cUUIDDoc, cDirDow)
             nStatus := oD4Sign:GetStatusCode()
@@ -638,15 +639,5 @@ EndIf
 | `SendToSign` | `erro\sendsigner\` | `CAD4S005 → ReenviaAssinatura()` |
 
 ---
-
-## Observações de implementação
-
-Pontos identificados na análise do código, úteis para manutenção e evolução:
-
-1. **`AddSigner` — nome e CPF não enviados:** a assinatura do método recebe `cNome` e `cCpf`, mas o JSON enviado ao D4Sign contém apenas o `email` e os campos fixos. Se for necessário validação por CPF ou exibição do nome no fluxo de assinatura, incluir os campos correspondentes no corpo da requisição.
-2. **`DownloadSigned` — parâmetro `cSavePath` não utilizado:** o método apenas solicita a URL de download; a gravação em disco é responsabilidade do chamador (`MemoWrite` + `HttpGet`). O parâmetro está reservado para uma futura internalização do download.
-3. **Divergência declaração × implementação:** a declaração da classe lista `AddSigner(cUUIDDoc, cNome, cEmail)`, mas a implementação aceita o 4º parâmetro `cCpf`. Recomenda-se alinhar a declaração.
-4. **Autenticação por query string:** `tokenAPI` e `cryptKey` trafegam na URL. Garantir que logs de proxy/servidor não persistam URLs completas, pois expõem as credenciais.
-5. **Credenciais sandbox fixas no código:** o construtor possui tokens hardcoded para o ambiente sandbox. **Não versionar valores reais** — substituir por parâmetros ou variáveis de ambiente antes de publicar o fonte em repositório.
-6. **Detecção de ambiente por nome do servidor:** a escolha produção/sandbox depende do nome do servidor conter `CASTWFL`/`CASTCOMP`. Ao subir novos servidores de produção, atenção à convenção de nomes (ou migrar para um parâmetro `MV_` de ambiente).
+atenção à convenção de nomes (ou migrar para um parâmetro `MV_` de ambiente).
 7. **Instância stateful:** `StatusCode` e `Result` refletem apenas a última requisição — em loops, capture os valores antes da próxima chamada.
