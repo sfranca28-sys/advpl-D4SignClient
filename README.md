@@ -369,7 +369,7 @@ Solicita o link de download do documento assinado, via `POST /documents/{uuid}/d
 
 ```xbase
 Local jRetorno := JsonObject():New()
-Local cDirDow  := "C:\d4sign\rh\ferias\docs\assinado\01\" as character
+Local cDirDow  := 'C:\d4sign\rh\ferias\docs\assinado\01\' as character
 Local cArquivo := "" as character
 Local cUrl     := "" as character
 Local cArqZip  := "" as character
