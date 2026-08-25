@@ -534,7 +534,7 @@ User Function ExemploD4S()
     Local cUUIDDoc := ""
     Local nStatus  := 0
     Local cStatus  := ""
-    Local cDirDow := "C:\d4sign\rh\ferias\docs\assinado\01\"
+    Local cDirDow := 'C:\d4sign\rh\ferias\docs\assinado\01\'
     Local cUrl    := ""
     Local cArqZip := ""
 
